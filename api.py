@@ -240,7 +240,7 @@ def reconcile_3_way(
     variance_tolerance: float = 0.05,
     auto_provision_legit_vendors: bool = False,
 ) -> dict:
-issues = validate_extraction(extracted)
+  issues = validate_extraction(extracted)
   if issues:
     return {
         "status": "NEEDS_REVIEW",
@@ -250,7 +250,7 @@ issues = validate_extraction(extracted)
         "authorized_amount": 0.0,
     }
 
-with pd.ExcelFile("company_ledger.xlsx") as xls:
+  with pd.ExcelFile("company_ledger.xlsx") as xls:
     pos_df = pd.read_excel(xls, "Purchase_Orders")
     grns_df = pd.read_excel(xls, "Goods_Received")
     history_df = pd.read_excel(xls, "Invoice_History")
