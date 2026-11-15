@@ -110,56 +110,38 @@ def check_pdf_text_layer(file_bytes: bytes) -> str:
 
 
 def local_heuristic_extraction(raw_text: str, filename: str) -> dict:
-  vendor = "Vertex Consulting Group"
-  if "staples" in filename.lower() or "staples" in raw_text.lower():
-    vendor = "Staples"
-  elif "dell" in filename.lower() or "dell" in raw_text.lower():
-    vendor = "Dell Technologies"
-  elif "apex" in filename.lower() or "apex" in raw_text.lower():
-    vendor = "Apex Logistics Global"
-  elif "amazon" in filename.lower() or "amazon" in raw_text.lower():
-    vendor = "Amazon Business"
-  else:
-    for known in VERIFIED_VENDOR_DIRECTORY:
-      if known in raw_text.lower():
-        vendor = known.title()
-        break
+  # Vendor: look for the label "Vendor:" and take whatever follows it.
+  vendor_match = re.search(r"Vendor:\s*(.+)", raw_text)
+  vendor = vendor_match.group(1).strip() if vendor_match else None
 
+  # Total: find every dollar amount like $1,250.00 and take the largest.
   amounts = re.findall(r"\$\s?([0-9,]+\.\d{2})", raw_text)
-  total_val = 4871.25
+  total_val = None
   if amounts:
-    parsed_floats = [float(a.replace(",", "")) for a in amounts]
-    total_val = max(parsed_floats)
+    total_val = max(float(a.replace(",", "")) for a in amounts)
 
+  # PO number: look for something like PO-1002.
   po_match = re.search(r"PO[-\s]?\d+", raw_text, re.IGNORECASE)
-  if po_match:
-    po_num = po_match.group(0).replace(" ", "-")
-  elif vendor == "Dell Technologies":
-    po_num = "PO-1002"
-  elif vendor == "Staples":
-    po_num = "PO-1001"
-  elif vendor == "Vertex Consulting Group":
-    po_num = "PO-1005"
-  else:
-    po_num = "None"
+  po_num = po_match.group(0).replace(" ", "-").upper() if po_match else None
 
-  inv_match = re.search(r"INV[-\s]?[A-Za-z0-9\-]+", raw_text, re.IGNORECASE)
-  inv_num = inv_match.group(0).replace(" ", "-") if inv_match else "INV-2026-001"
+  # Invoice number: only take what comes AFTER a label like "Invoice Number:".
+  inv_match = re.search(
+      r"Invoice\s*(?:Number|No\.?|#)\s*:?\s*([A-Za-z0-9\-]+)",
+      raw_text,
+      re.IGNORECASE,
+  )
+  inv_num = inv_match.group(1) if inv_match else None
+
+  # Date: look for a date written like 2026-10-22.
+  date_match = re.search(r"\d{4}-\d{2}-\d{2}", raw_text)
+  inv_date = date_match.group(0) if date_match else None
 
   return {
       "invoice_number": inv_num,
       "vendor_name": vendor,
-      "invoice_date": "2026-10-22",
+      "invoice_date": inv_date,
       "po_number": po_num,
-      "line_items": [
-          {
-              "item_sku": "SRV-01",
-              "description": f"{vendor} Contractual Retainer & Deliverables",
-              "quantity": 1.0,
-              "unit_price": total_val,
-              "total_line_amount": total_val,
-          }
-      ],
+      "line_items": [],
       "subtotal": total_val,
       "tax_amount": 0.0,
       "total_amount": total_val,
@@ -221,11 +203,53 @@ def provision_po_and_grn_to_ledger(
   return po_num
 
 
+def validate_extraction(extracted: dict) -> list:
+  """Return a list of problems. Empty list = safe to reconcile."""
+  issues = []
+
+  if not extracted.get("vendor_name"):
+    issues.append("Vendor name could not be read.")
+
+  if not extracted.get("invoice_number"):
+    issues.append("Invoice number could not be read.")
+
+  total = extracted.get("total_amount")
+  if total is None or total <= 0:
+    issues.append("Invoice total could not be read.")
+    return issues  # can't check the math without a total
+
+  subtotal = extracted.get("subtotal") or 0.0
+  tax = extracted.get("tax_amount") or 0.0
+  if abs((subtotal + tax) - total) > 0.01:
+    issues.append(
+        f"Subtotal ${subtotal:,.2f} + tax ${tax:,.2f} does not equal total ${total:,.2f}."
+    )
+
+  line_items = extracted.get("line_items") or []
+  if line_items:
+    line_sum = sum((item.get("total_line_amount") or 0.0) for item in line_items)
+    if abs(line_sum - subtotal) > 0.01:
+      issues.append(
+          f"Line items add up to ${line_sum:,.2f} but subtotal says ${subtotal:,.2f}."
+      )
+
+  return issues
+
 def reconcile_3_way(
     extracted: dict,
     variance_tolerance: float = 0.05,
     auto_provision_legit_vendors: bool = False,
 ) -> dict:
+  issues = validate_extraction(extracted)
+  if issues:
+    return {
+        "status": "NEEDS_REVIEW",
+        "verdict": "EXTRACTION_INCOMPLETE",
+        "details": " | ".join(issues),
+        "linked_po": "None",
+        "authorized_amount": 0.0,
+    }
+
   with pd.ExcelFile("company_ledger.xlsx") as xls:
     pos_df = pd.read_excel(xls, "Purchase_Orders")
     grns_df = pd.read_excel(xls, "Goods_Received")
@@ -459,4 +483,3 @@ def get_job_status(job_id: str):
   if not job:
     raise HTTPException(status_code=404, detail="Job ID not found")
   return job 
-  
