@@ -203,12 +203,52 @@ def provision_po_and_grn_to_ledger(
   return po_num
 
 
+def validate_extraction(extracted: dict) -> list:
+  """Return a list of problems. Empty list = safe to reconcile."""
+  issues = []
+
+  if not extracted.get("vendor_name"):
+    issues.append("Vendor name could not be read.")
+
+  if not extracted.get("invoice_number"):
+    issues.append("Invoice number could not be read.")
+
+  total = extracted.get("total_amount")
+  if total is None or total <= 0:
+    issues.append("Invoice total could not be read.")
+    return issues  # can't check the math without a total
+
+  subtotal = extracted.get("subtotal") or 0.0
+  tax = extracted.get("tax_amount") or 0.0
+  if abs((subtotal + tax) - total) > 0.01:
+    issues.append(
+        f"Subtotal ${subtotal:,.2f} + tax ${tax:,.2f} does not equal total ${total:,.2f}."
+    )
+
+  line_items = extracted.get("line_items") or []
+  if line_items:
+    line_sum = sum((item.get("total_line_amount") or 0.0) for item in line_items)
+    if abs(line_sum - subtotal) > 0.01:
+      issues.append(
+          f"Line items add up to ${line_sum:,.2f} but subtotal says ${subtotal:,.2f}."
+      )
+
+  return issues
+
 def reconcile_3_way(
     extracted: dict,
     variance_tolerance: float = 0.05,
     auto_provision_legit_vendors: bool = False,
 ) -> dict:
-  with pd.ExcelFile("company_ledger.xlsx") as xls:
+    issues = validate_extraction(extracted)
+  if issues:
+    return {
+        "status": "NEEDS_REVIEW",
+        "verdict": "EXTRACTION_INCOMPLETE",
+        "details": " | ".join(issues),
+        "linked_po": "None",
+        "authorized_amount": 0.0,
+    }with pd.ExcelFile("company_ledger.xlsx") as xls:
     pos_df = pd.read_excel(xls, "Purchase_Orders")
     grns_df = pd.read_excel(xls, "Goods_Received")
     history_df = pd.read_excel(xls, "Invoice_History")
